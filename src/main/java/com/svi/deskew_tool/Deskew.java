@@ -5,27 +5,42 @@ import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.awt.image.DataBuffer;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.Iterator;
-import java.util.List;
-import java.util.concurrent.*;
+import java.util.Locale;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageWriteParam;
 import javax.imageio.ImageWriter;
+import javax.imageio.metadata.IIOMetadata;
+import javax.imageio.metadata.IIOMetadataFormatImpl;
+import javax.imageio.metadata.IIOMetadataNode;
 import javax.imageio.stream.FileImageOutputStream;
+import javax.imageio.stream.ImageInputStream;
+
+import com.sun.media.imageio.plugins.tiff.TIFFImageWriteParam;
+import com.sun.media.imageioimpl.plugins.tiff.TIFFImageReader;
+import com.sun.media.imageioimpl.plugins.tiff.TIFFImageReaderSpi;
 
 public class Deskew {
 
 	public static void main(String[] args) throws IOException, ExecutionException {
 		// TODO Auto-generated method stub
+		initializeConfig();
 
-		String inFile = "input";
-		String outFile = "output";
-		
+		String inFile = AppConfig.IMAGE_INPUT_PATH.value();
+		String outFile = AppConfig.OUTPUT_PATH.value();
 		File inputfolder = new File(inFile);
 		File outputfolder = new File(outFile);
+		if(!outputfolder.exists())outputfolder.mkdirs();
 		int CPUCores =  Runtime.getRuntime().availableProcessors();
 		ExecutorService pool;
 		pool = Executors.newFixedThreadPool(CPUCores);
@@ -35,7 +50,11 @@ public class Deskew {
 		for(File file:inputfolder.listFiles()){
 			pool.submit(()->{
 				try {
-					deskew(file, outputfolder);
+					if(file.getName().substring(file.getName().length() - 3).equals("jpg")){
+						deskew(file, outputfolder);
+					}else{
+						deskewTIFF(file, outputfolder);
+					}
 					System.out.println(executor.getActiveCount());
 					System.out.println(executor.getQueue().size());
 				} catch (Exception e) {
@@ -46,7 +65,7 @@ public class Deskew {
 			});
 		}
 		System.out.println("deskewing files...");
-		System.out.println(executor.getTaskCount());
+		System.out.println("Total Tasks : " +executor.getTaskCount());
 		pool.shutdown();
 		try {
 			pool.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
@@ -56,7 +75,7 @@ public class Deskew {
 		} finally {
 			long end = System.currentTimeMillis();
 			System.out.println("Total process took " + (end - start)/1000 + " secs");
-			System.out.println(" completed tasks" + executor.getQueue());
+			System.out.println(" completed tasks" + executor.getCompletedTaskCount());
 		}
 	}
 	
@@ -75,16 +94,66 @@ public static void deskew(File file,
 	newImageDeskewed = rotateImage(inputForskewed, -angle2 );
 	File outputImage = new File(outputfolder.getAbsolutePath()+"/"+ file.getName());
     Iterator<ImageWriter> iter = ImageIO.getImageWritersByFormatName("jpeg");
-        ImageWriter writer = iter.next();
-	ImageWriteParam param = writer.getDefaultWriteParam();
-
-	param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-	param.setCompressionQuality(0.5f);
+        ImageWriter writer = null;
+	ImageWriteParam param = null;
+	    
 	System.out.println("Writing " + file.getName() + " Thread is " + Thread.currentThread().getName());
-	writer.setOutput(new FileImageOutputStream(outputImage));
-	writer.write(null, new IIOImage(newImageDeskewed ,null,null),param);
-    writer.dispose();
+		writer = iter.next();
+		writer.setOutput(new FileImageOutputStream(outputImage));
+		param = writer.getDefaultWriteParam();
+		param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+		param.setCompressionQuality(0.5f);
+		
+		writer.write(null, new IIOImage(newImageDeskewed ,null,null),param);
+		writer.dispose();
+		
     } catch (IOException e) {
+		// TODO Auto-generated catch block
+		e.printStackTrace();
+	}
+    long end = System.currentTimeMillis();
+	System.out.println("process took " + (end - start)/1000 + "secs" + " for Thread:" + Thread.currentThread().getName());
+}
+
+public static void deskewTIFF(File file,
+		File outputfolder) throws Exception{
+	long start = System.currentTimeMillis();
+	double angle = 0;
+	double angle2 = 0;
+	BufferedImage inputForskewed = null;
+	BufferedImage newImageDeskewed = null;
+	Iterator<ImageWriter> it = ImageIO.getImageWritersByFormatName("TIF");
+	ImageWriter writer;
+	if (it.hasNext()) {
+		writer = (ImageWriter)it.next();
+	}
+	
+	try {	
+		inputForskewed = ImageIO.read(file);
+		angle = doIt(inputForskewed);
+		TIFFImageReader reader = new TIFFImageReader(new TIFFImageReaderSpi());
+		ImageInputStream stream = ImageIO.createImageInputStream(file);
+		reader.setInput(stream);
+		reader.read(0);
+		angle2 = -57.295779513082320876798154814105 * angle;
+		newImageDeskewed = rotateImage(inputForskewed, -angle2 );
+		File outputImage = new File(outputfolder.getAbsolutePath()+"/"+ file.getName());
+		
+		writer = ImageIO.getImageWritersByFormatName("TIF").next();
+		writer.setOutput(new FileImageOutputStream(outputImage));
+		TIFFImageWriteParam param = new TIFFImageWriteParam(Locale.getDefault());
+		param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+	    IIOMetadata meta = reader.getImageMetadata(0);				//get metadata of the input image
+	    IIOMetadataNode root = (IIOMetadataNode) meta.getAsTree(IIOMetadataFormatImpl.standardMetadataFormatName);
+	    IIOMetadataNode compression = (IIOMetadataNode) root.getElementsByTagName("CompressionTypeName").item(0);
+	    String compressionName = compression.getAttribute("value");			//get the compression type of the input image
+	    System.out.println("compression type is : " + compressionName);
+	    param.setCompressionType(compressionName);
+	    param.setCompressionQuality(0.5f);	
+	    IIOImage iioImage = new IIOImage(newImageDeskewed, null, meta);
+		writer.write(meta, iioImage, param);
+		writer.dispose();
+	} catch (IOException e) {
 		// TODO Auto-generated catch block
 		e.printStackTrace();
 	}
@@ -286,4 +355,17 @@ public static double doIt(BufferedImage image) {
 	  g.drawRenderedImage(src, null);
 	  return result;
 	  }
+  /**
+	 * 		method to initialize the config object using the config.properties file
+	 */
+	private static void initializeConfig() {
+		try {
+			AppConfig.setContext(new FileInputStream(new File("config/config.properties")));
+		} catch (FileNotFoundException e) {
+			System.out.println("ConfigFile Not Found");
+			e.printStackTrace();
+			System.exit(0);
+		}
+
+	}
 }
